@@ -116,11 +116,6 @@ class TextmoeSegWrapper(pl.LightningModule):
                 y = target[labeled]
                 seg = self.loss_fn(logits, y)
                 total = seg + 0.01 * self.gate_balance_loss(aux)
-                rcea = self.rcea_supervised_loss(aux, y)
-                total = total + 0.1 * rcea
-                sep = self.rcea_expert_specialization_loss(aux, y)
-                cross = self.rcea_cross_negative_loss(aux)
-                total = total + 0.05 * sep + 0.02 * cross
             unlabeled = ~labeled
             if unlabeled.any():
                 x = image[unlabeled]

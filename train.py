@@ -55,6 +55,7 @@ if __name__ == "__main__":
         image_size=args.image_size,
         mode="valid",
         dataset_id=0,
+        seed=args.seed,
     )
     dl_labeled = DataLoader(
         ds_labeled, batch_size=args.train_batch_size, shuffle=True,

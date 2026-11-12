@@ -63,7 +63,7 @@ class QaTa(Dataset):
         if train:
             modes = ["bicubic", "nearest"] if labeled else ["bicubic"]
             transforms.append(
-                RandRotated(keys, range_x=(-20, 20), prob=1.0, mode=modes)
+                RandRotated(keys, range_x=(-np.pi / 9, np.pi / 9), prob=1.0, mode=modes)
             )
         transforms.append(Resized(["image"], image_size, mode="bicubic"))
         if labeled:
@@ -108,17 +108,6 @@ class QaTa(Dataset):
             "input_ids": token_output["input_ids"].squeeze(0),
             "attention_mask": token_output["attention_mask"].squeeze(0),
         }
-
-        negative_ids, negative_masks = [], []
-        for field in ["neg_disease", "neg_spatial", "neg_extent"]:
-            negative = self.tokenizer.encode_plus(
-                row[field], padding="max_length", max_length=24, truncation=True,
-                return_attention_mask=True, return_tensors="pt",
-            )
-            negative_ids.append(negative["input_ids"].squeeze(0))
-            negative_masks.append(negative["attention_mask"].squeeze(0))
-        text["neg_input_ids"] = torch.stack(negative_ids)
-        text["neg_attention_mask"] = torch.stack(negative_masks)
 
         x = [image, text, self.dataset_id]
         flag = int(labeled)

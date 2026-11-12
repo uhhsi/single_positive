@@ -48,6 +48,7 @@ if __name__ == "__main__":
         image_size=args.image_size,
         mode="test",
         dataset_id=0,
+        seed=args.seed,
     )
     dl_test = DataLoader(
         ds_test, batch_size=args.valid_batch_size, shuffle=False,

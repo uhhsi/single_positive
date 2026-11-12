@@ -98,20 +98,11 @@ class ReliabilityCounterfactualExpertAttention(nn.Module):
         evidence = torch.logsumexp(logits, dim=-1) - valid_count.log()[:, None, None]
         return (context, evidence)
 
-    def forward(self, visual_tokens, positive_text, negative_text, positive_mask=None, negative_mask=None):
+    def forward(self, visual_tokens, positive_text, positive_mask=None):
         query = self._split_heads(self.query_proj(self.query_norm(visual_tokens)))
-        positive_context, positive_evidence = self._attend(query, positive_text, positive_mask)
-        negative_context, negative_evidence = self._attend(query, negative_text, negative_mask)
-        batch = visual_tokens.size(0)
-        spatial_length = visual_tokens.size(1)
-        context = (positive_context - negative_context).transpose(1, 2)
-        context = context.reshape(batch, spatial_length, self.dim)
-        context = self.output_proj(context)
-        score = (positive_evidence - negative_evidence).mean(dim=1).unsqueeze(-1)
-        gate_input = torch.cat([visual_tokens, context, score], dim=-1)
-        gate = torch.sigmoid(self.gate(gate_input))
-        output = visual_tokens + self.residual_scale * gate * context
-        return (output, {'rcea_score_tokens': score, 'rcea_gate_tokens': gate})
+        context, _ = self._attend(query, positive_text, positive_mask)
+        context = context.transpose(1, 2).reshape(visual_tokens.size(0), visual_tokens.size(1), self.dim)
+        return visual_tokens + self.residual_scale * self.output_proj(context), {}
 
 class ContextExpertConv(nn.Module):
 
@@ -149,11 +140,7 @@ class MoeConv(nn.Module):
         super().__init__()
         self.text_project = nn.Sequential(nn.Linear(768, out_channels), nn.GELU(), nn.LayerNorm(out_channels), nn.LeakyReLU(0.1))
         self.txt_pos = PositionalEncoding(out_channels, max_len=text_length)
-        self.image_gate_project = nn.Linear(in_channels, out_channels)
-        gate_dim = in_channels + out_channels + 1
-        self.gate = nn.Sequential(nn.LayerNorm(gate_dim), nn.Linear(gate_dim, max(gate_dim // 2, 3)), nn.GELU(), nn.Linear(max(gate_dim // 2, 3), 3))
         convolutions = [nn.Conv2d(in_channels, out_channels, 3, padding=1)]
-        convolutions += [ContextExpertConv(in_channels, out_channels), BoundaryExpertConv(in_channels, out_channels)]
         self.experts = nn.ModuleList()
         for convolution in convolutions:
             modules = dict(conv=convolution, vis_pos=PositionalEncoding(out_channels))
@@ -167,33 +154,17 @@ class MoeConv(nn.Module):
         weight = mask.to(tokens.dtype).unsqueeze(-1)
         return (tokens * weight).sum(dim=1) / weight.sum(dim=1).clamp_min(1e-06)
 
-    def forward(self, image, positive_text, negative_text, positive_mask, negative_mask):
+    def forward(self, image, positive_text, positive_mask):
         batch, _, height, width = image.shape
-        pooled = image.mean(dim=(2, 3))
         positive_projected = self.text_project(positive_text)
-        text_pooled = self._masked_mean(positive_projected, positive_mask)
         positive_tokens = self.txt_pos(positive_projected)
-        _, factors, length, _ = negative_text.shape
-        negative_projected = self.text_project(negative_text)
-        channels = negative_projected.size(-1)
-        negative_tokens = self.txt_pos(negative_projected.reshape(batch * factors, length, channels)).reshape(batch, factors, length, channels)
-        image_semantic = self.image_gate_project(pooled)
-        similarity = F.cosine_similarity(image_semantic, text_pooled, dim=-1).unsqueeze(-1)
-        weights = F.softmax(self.gate(torch.cat([pooled, text_pooled, similarity], dim=-1)), dim=-1)
-        outputs, features, scores, gates = ([], [], [], [])
-        for index, expert in enumerate(self.experts):
+        outputs = []
+        for expert in self.experts:
             visual = expert['conv'](image)
-            features.append(visual)
             tokens = expert['vis_pos'](visual.permute(0, 2, 3, 1).reshape(batch, height * width, visual.size(1)))
-            fused, aux = expert['rcea'](tokens, positive_tokens, negative_tokens[:, index], positive_mask, negative_mask[:, index])
-            scores.append(aux['rcea_score_tokens'].reshape(batch, height, width, 1).permute(0, 3, 1, 2))
-            gates.append(aux['rcea_gate_tokens'].reshape(batch, height, width, 1).permute(0, 3, 1, 2))
+            fused, _ = expert['rcea'](tokens, positive_tokens, positive_mask)
             outputs.append(fused.reshape(batch, height, width, -1).permute(0, 3, 1, 2))
-        stacked = torch.stack(outputs, dim=1)
-        mixture = weights[:, :, None, None, None]
-        output = (mixture * stacked).sum(dim=1)
-        aux = dict(rcea_score=(mixture * torch.stack(scores, dim=1)).sum(dim=1), rcea_gate=(mixture * torch.stack(gates, dim=1)).sum(dim=1), rcea_expert_conv_features=torch.stack(features, dim=1), rcea_expert_outputs=stacked, rcea_positive_text=positive_tokens, rcea_negative_text=negative_tokens, rcea_positive_mask=positive_mask, rcea_negative_mask=negative_mask, rcea_expert_negative_factors=torch.arange(3, device=image.device))
-        return (output, weights, aux)
+        return outputs[0], image.new_ones((batch, 1)), {}
 
 class UNetDecoderBlock(nn.Module):
 
@@ -235,10 +206,7 @@ class TextmoeSeg(nn.Module):
             image_features = image_features[1:]
         pm = text['attention_mask']
         pos = self.text_encoder(text['input_ids'], pm)
-        ids, nm = (text['neg_input_ids'], text['neg_attention_mask'])
-        batch, factors, length = ids.shape
-        neg = self.text_encoder(ids.reshape(batch * factors, length), nm.reshape(batch * factors, length)).reshape(batch, factors, length, -1)
-        encoded = (pos, neg, pm, nm)
+        encoded = (pos, pm)
         x, g1, g2, a1, a2 = self.block1(image_features[-1], image_features[-2], *encoded)
         x, g3, g4, a3, a4 = self.block2(x, image_features[-3], *encoded)
         x1, g5, g6, a5, a6 = self.block3(x, image_features[-4], *encoded)
